@@ -1,84 +1,186 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+
+import '../config/api_config.dart';
 import '../storage/storage_provider.dart';
 import 'language_model.dart';
+import 'translation_provider.dart';
 
-// Temporary built-in languages.
-//
-// These allow the app to work before the backend language API is connected.
-// Later, the backend will provide the complete list of supported languages.
-const List<Language> defaultLanguages = [
-  Language(
-    code: 'en',
-    name: 'English',
-    nativeName: 'English',
-  ),
-  Language(
-    code: 'hi',
-    name: 'Hindi',
-    nativeName: 'हिन्दी',
-  ),
-  Language(
-    code: 'fr',
-    name: 'French',
-    nativeName: 'Français',
-  ),
-];
+// Fetch all supported languages from our NestJS backend.
+final availableLanguagesProvider =
+    FutureProvider<List<Language>>((ref) async {
+  final response = await http.get(
+    Uri.parse('${ApiConfig.baseUrl}/translation/languages'),
+    headers: {
+      'Accept': 'application/json',
+    },
+  );
 
-// Provides the currently available languages.
-//
-// For now, this uses the built-in development list.
-// Later, this provider will receive the language list from the backend.
-final availableLanguagesProvider = Provider<List<Language>>((ref) {
-  return defaultLanguages;
+  if (response.statusCode != 200) {
+    throw Exception(
+      'Failed to load languages. Status: ${response.statusCode}',
+    );
+  }
+
+  final Map<String, dynamic> data =
+      jsonDecode(response.body) as Map<String, dynamic>;
+
+  final languages = data.entries.map((entry) {
+    return Language.fromJson(
+      entry.key,
+      Map<String, dynamic>.from(entry.value as Map),
+    );
+  }).toList();
+
+  languages.sort(
+    (a, b) =>
+        a.name.toLowerCase().compareTo(
+              b.name.toLowerCase(),
+            ),
+  );
+
+  if (languages.isEmpty) {
+    throw Exception(
+      'No supported languages were returned.',
+    );
+  }
+
+  return languages;
 });
 
+// Manages the selected language and its translations.
 class LanguageNotifier extends AsyncNotifier<Language> {
   @override
   Future<Language> build() async {
     final storage = ref.read(localStorageProvider);
-    final availableLanguages = ref.read(availableLanguagesProvider);
 
-    // Get the saved language code from the device.
-    final savedLanguageCode = await storage.getLanguage();
+    final availableLanguages =
+        await ref.watch(
+      availableLanguagesProvider.future,
+    );
 
-    // If no language was previously saved, use English.
+    final savedLanguageCode =
+        await storage.getLanguage();
+
+    Language selectedLanguage;
+
     if (savedLanguageCode == null) {
-      return _getEnglishLanguage(availableLanguages);
+      selectedLanguage =
+          _getEnglishLanguage(availableLanguages);
+    } else {
+      selectedLanguage =
+          availableLanguages.firstWhere(
+        (language) =>
+            language.code == savedLanguageCode,
+        orElse: () =>
+            _getEnglishLanguage(availableLanguages),
+      );
     }
 
-    // Find the saved language in the available languages.
-    for (final language in availableLanguages) {
-      if (language.code == savedLanguageCode) {
-        return language;
+    // Load translations if a non-English language
+    // was previously selected.
+    if (selectedLanguage.code != 'en') {
+      try {
+        await _loadTranslations(
+          selectedLanguage.code,
+        );
+
+        // Notify all widgets using translate().
+        ref
+            .read(
+              translationVersionProvider.notifier,
+            )
+            .state++;
+      } catch (error) {
+        debugPrint(
+          'Initial translation loading failed: $error',
+        );
       }
     }
 
-    // Fall back to English if the saved language is unavailable.
-    return _getEnglishLanguage(availableLanguages);
+    return selectedLanguage;
   }
 
-  Future<void> setLanguage(Language language) async {
-    // Update the selected language immediately.
+  // Change the selected language.
+  Future<void> setLanguage(
+    Language language,
+  ) async {
+    // Immediately update the selected language.
     state = AsyncData(language);
 
-    // Save the selected language on the device.
-    final storage = ref.read(localStorageProvider);
+    final storage =
+        ref.read(localStorageProvider);
+
     await storage.saveLanguage(language.code);
+
+    // English does not need to be loaded from the backend.
+    if (language.code == 'en') {
+      ref
+          .read(
+            translationVersionProvider.notifier,
+          )
+          .state++;
+
+      return;
+    }
+
+    try {
+      // Load the complete translation pack.
+      await _loadTranslations(language.code);
+
+      // Rebuild all widgets using translate().
+      ref
+          .read(
+            translationVersionProvider.notifier,
+          )
+          .state++;
+    } catch (error) {
+      debugPrint(
+        'Translation loading failed: $error',
+      );
+    }
   }
 
-  Language _getEnglishLanguage(List<Language> languages) {
+  // Load all application translations using TranslationManager.
+  Future<void> _loadTranslations(
+    String languageCode,
+  ) async {
+    final translationManager =
+        ref.read(translationManagerProvider);
+
+    final translationRepository =
+        ref.read(translationRepositoryProvider);
+
+    // Get ALL source text from one central location.
+    // This includes the left-side brand text.
+    final sourceTexts =
+        translationRepository.getSourceTexts();
+
+    await translationManager.loadLanguagePack(
+      languageCode: languageCode,
+      sourceTexts: sourceTexts,
+    );
+  }
+
+  // Find English in the list returned by the backend.
+  Language _getEnglishLanguage(
+    List<Language> languages,
+  ) {
     for (final language in languages) {
       if (language.code == 'en') {
         return language;
       }
     }
 
-    // English should always exist in the supported language list.
     return languages.first;
   }
 }
 
+// Provides the currently selected language.
 final languageProvider =
     AsyncNotifierProvider<LanguageNotifier, Language>(
   LanguageNotifier.new,

@@ -1,3 +1,9 @@
+
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+import '../config/api_config.dart';
 import 'translation_repository.dart';
 
 class TranslationManager {
@@ -17,25 +23,65 @@ class TranslationManager {
     );
   }
 
-  // Saves a complete language pack received from the backend.
-  //
-  // The backend connection will be added later.
-  void loadLanguagePack({
+  Future<void> loadLanguagePack({
     required String languageCode,
-    required Map<String, String> translations,
-  }) {
+    required Map<String, String> sourceTexts,
+  }) async {
+    if (languageCode == 'en') {
+      return;
+    }
+
+    if (repository.hasLanguagePack(languageCode)) {
+      return;
+    }
+
+    final response = await http.post(
+      Uri.parse('${ApiConfig.baseUrl}/translation/batch'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({
+        'texts': sourceTexts.values.toList(),
+        'targetLanguage': languageCode,
+      }),
+    );
+
+    // Accept any successful HTTP status (200–299).
+    if (response.statusCode < 200 ||
+        response.statusCode >= 300) {
+      throw Exception(
+        'Batch translation failed: ${response.statusCode}',
+      );
+    }
+
+    final List<dynamic> responseData =
+        jsonDecode(response.body) as List<dynamic>;
+
+    if (responseData.length != sourceTexts.length) {
+      throw Exception('Incomplete translation response.');
+    }
+
+    final translatedTexts = <String, String>{};
+    final keys = sourceTexts.keys.toList();
+
+    for (int i = 0; i < keys.length; i++) {
+      final item = responseData[i] as Map<String, dynamic>;
+
+      translatedTexts[keys[i]] =
+          item['translatedText'] as String;
+    }
+
     repository.saveLanguagePack(
       languageCode: languageCode,
-      translations: translations,
+      translations: translatedTexts,
     );
   }
 
-  // Checks whether a language pack is already available.
   bool isLanguageLoaded(String languageCode) {
     return repository.hasLanguagePack(languageCode);
   }
 
-  // Removes a language pack from memory if needed.
   void removeLanguagePack(String languageCode) {
     repository.removeLanguagePack(languageCode);
   }

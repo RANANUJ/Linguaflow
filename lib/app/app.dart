@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:linguaflow/features/auth/presentation/login_screen.dart';
+import 'package:linguaflow/features/auth/presentation/screens/login_screen.dart';
 
 import '../core/localization/language_provider.dart';
 import '../core/localization/translation_keys.dart';
